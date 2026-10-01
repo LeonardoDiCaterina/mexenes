@@ -3,7 +3,8 @@
 run_analysis.py
 
 Automated in-situ XRD temperature ramp pipeline.
-Imports settings from config.py, processes all .xy files in DATA_DIR,
+Imports settings from config.py, applies robust preprocessing (despiking,
+baseline subtraction, Savitzky-Golay smoothing, sub-pixel apex interpolation),
 tracks peaks, and produces publication-ready overlays, heatmaps, and GIFs.
 """
 
@@ -16,10 +17,13 @@ import matplotlib.pyplot as plt
 from matplotlib import cm, colors, gridspec
 import matplotlib.patheffects as pe
 
-# Add project root to sys.path to load config
+# Add project root and scripts directory to sys.path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
+sys.path.insert(0, str(ROOT_DIR / "scripts"))
+
 import config
+from preprocessing import preprocess_scan, peak_apex_subpixel
 
 try:
     from PIL import Image
@@ -43,6 +47,9 @@ def read_data(path):
     return data
 
 def peak_in_range(two_theta, intensity, lo, hi, name=""):
+    if config.SUBPIXEL_APEX:
+        center, _ = peak_apex_subpixel(two_theta, intensity, lo, hi)
+        return center
     mask = (two_theta >= lo) & (two_theta <= hi)
     if not mask.any():
         print(f"[{name}] warning: no points found in range [{lo}, {hi}] deg")
@@ -90,68 +97,11 @@ def draw_refs(ax, lo, hi, temp):
         ax.text(hi, base + 0.98, ph["name"], ha="right", va="top", fontsize=7,
                 color=ph["color"], fontweight="bold")
 
-def window_peak(tt, inten, w_lo, w_hi, sigma=0.0):
-    info = {"reason": "", "x": np.nan, "height": 0.0, "required": 0.0}
-    idx = np.where((tt >= w_lo) & (tt <= w_hi))[0]
-    if len(idx) < 3:
-        info["reason"] = "no data in window"
-        return None, info
-    i_max = idx[np.argmax(inten[idx])]
-    x_m, y_m = tt[i_max], inten[i_max]
-    info["x"] = x_m
-    if sigma > 0:
-        width = w_hi - w_lo
-        left = np.where((tt >= w_lo - width) & (tt < w_lo))[0]
-        right = np.where((tt > w_hi) & (tt <= w_hi + width))[0]
-        wide = np.where((tt >= w_lo - width) & (tt <= w_hi + width))[0]
-        if i_max == idx[0] or i_max == idx[-1]:
-            info["reason"] = "maximum is on edge of window"
-            return None, info
-        if len(left) >= 3 and len(right) >= 3:
-            xl, yl = np.median(tt[left]), np.median(inten[left])
-            xr, yr = np.median(tt[right]), np.median(inten[right])
-            base = yl + (yr - yl) * (x_m - xl) / (xr - xl)
-        else:
-            base = np.median(inten[wide])
-        d = np.diff(inten[wide])
-        noise = 1.4826 * np.median(np.abs(d - np.median(d))) / np.sqrt(2.0)
-        info["height"] = y_m - base
-        info["required"] = sigma * noise
-        if info["height"] <= 0 or info["height"] < info["required"]:
-            info["reason"] = "below noise threshold"
-            return None, info
-    return (x_m, y_m), info
-
-def build_label_specs(with_rutile):
-    specs = []
-    for tag, w_lo, w_hi in config.MXENE_LABELS:
-        specs.append({
-            "key": f"mx_{tag}", "text": f"MXene ({tag})", "w_lo": w_lo, "w_hi": w_hi,
-            "color": config.MXENE_LABEL_COLOR, "sigma": config.MXENE_PRESENCE_SIGMA
-        })
-    if with_rutile:
-        for tag, center, half in config.RUTILE_LABELS:
-            specs.append({
-                "key": f"ru_{tag}", "text": f"Rutile ({tag})", "w_lo": center - half, "w_hi": center + half,
-                "color": config.RUTILE_LABEL_COLOR, "sigma": config.RUTILE_PRESENCE_SIGMA
-            })
-    return specs
-
-def write_gif(path, arrays, fps):
-    if Image is None:
-        return "Pillow not installed; skipping GIF"
-    images = [Image.fromarray(a) for a in arrays]
-    images[0].save(
-        path, save_all=True, append_images=images[1:],
-        duration=int(1000.0 / fps),
-        loop=0 if config.GIF_LOOP else 1
-    )
-    return "Pillow"
-
 def run():
     print(f"=== MXene XRD In-Situ Analysis ===")
-    print(f"Input Directory:  {config.DATA_DIR}")
-    print(f"Output Directory: {config.OUTPUT_DIR}")
+    print(f"Input Directory:       {config.DATA_DIR}")
+    print(f"Output Directory:      {config.OUTPUT_DIR}")
+    print(f"Preprocessing Enabled: {config.ENABLE_PREPROCESSING} (Baseline={config.BASELINE_METHOD}, SavGol={config.ENABLE_SAVGOL}, SubPixel={config.SUBPIXEL_APEX})")
 
     files = sorted(glob.glob(os.path.join(config.DATA_DIR, config.FILE_PATTERN)))
     if not files:
@@ -180,10 +130,27 @@ def run():
             results.append((temp, np.nan))
             continue
 
-        tt, inten = data[:, 0], data[:, 1]
-        peak = peak_in_range(tt, inten, config.TWO_THETA_MIN, config.TWO_THETA_MAX, name)
+        tt, raw_inten = data[:, 0], data[:, 1]
+        
+        # Apply robust preprocessing
+        if config.ENABLE_PREPROCESSING:
+            clean_inten, baseline, _ = preprocess_scan(
+                tt, raw_inten,
+                remove_spike=config.REMOVE_SPIKES,
+                smooth=config.ENABLE_SAVGOL,
+                subtract_bg=config.SUBTRACT_BASELINE,
+                bg_method=config.BASELINE_METHOD,
+                savgol_win=config.SAVGOL_WINDOW,
+                savgol_poly=config.SAVGOL_POLYORDER,
+                snip_iters=config.BASELINE_SNIP_ITERATIONS
+            )
+            inten_for_tracking = clean_inten
+        else:
+            inten_for_tracking = raw_inten
+
+        peak = peak_in_range(tt, inten_for_tracking, config.TWO_THETA_MIN, config.TWO_THETA_MAX, name)
         results.append((temp, peak))
-        patterns.append((temp, tt, inten, name))
+        patterns.append((temp, tt, inten_for_tracking, name))
         peak_by_name[name] = peak
         print(f"  [{name}] T = {temp:4.0f} °C -> Peak at 2theta = {peak:.4f}°")
 
@@ -192,7 +159,8 @@ def run():
     table = np.array(results, dtype=float)
     table = table[np.argsort(table[:, 0], kind="mergesort")]
     header = (
-        f"# Peak position (max intensity) in range [{config.TWO_THETA_MIN}, {config.TWO_THETA_MAX}] deg vs temperature\n"
+        f"# Peak position in range [{config.TWO_THETA_MIN}, {config.TWO_THETA_MAX}] deg vs temperature\n"
+        f"# Preprocessing: Baseline={config.BASELINE_METHOD}, SavGol={config.ENABLE_SAVGOL}, SubPixel={config.SUBPIXEL_APEX}\n"
         "# columns: temperature(C)  peak_position_2theta(deg)"
     )
     np.savetxt(table_file, table, fmt="%8.2f  %10.4f", header=header)
@@ -215,7 +183,7 @@ def run():
     ax1.set_xlim(lo, hi)
     ax1.set_xlabel("2theta (deg)")
     ax1.set_ylabel("Intensity (a.u.)")
-    ax1.set_title(f"Diffractograms Overlay ({len(plot_pats)} scans)")
+    ax1.set_title(f"Diffractograms Overlay - Preprocessed ({len(plot_pats)} scans)")
     fig1.colorbar(sm, ax=ax1, label=f"Temperature ({config.TEMP_UNIT})")
     fig1.tight_layout()
     overlay_path = config.OUTPUT_FILE_PREFIX + "_overlay.png"
@@ -239,13 +207,13 @@ def run():
 
         if config.SHOW_PEAK_TRACK:
             t = table[np.isfinite(table[:, 0]) & np.isfinite(table[:, 1])]
-            ax2.plot(t[:, 1], t[:, 0], color="red", lw=2, linestyle="--", label="Peak Track")
+            ax2.plot(t[:, 1], t[:, 0], color="red", lw=2, linestyle="--", label="Peak Track (Sub-pixel)")
             ax2.legend(loc="upper right")
 
         ax2.set_xlim(lo, hi)
         ax2.set_xlabel("2theta (deg)")
         ax2.set_ylabel(f"Temperature ({config.TEMP_UNIT})")
-        ax2.set_title("Diffractogram Map (Heatmap)")
+        ax2.set_title("Diffractogram Map (Heatmap with Sub-pixel Peak Track)")
         fig2.tight_layout()
         heatmap_path = config.OUTPUT_FILE_PREFIX + "_heatmap.png"
         fig2.savefig(heatmap_path, dpi=200)

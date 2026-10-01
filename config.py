@@ -26,7 +26,22 @@ COMMENT_CHAR = "#"
 TEMP_PATTERN = re.compile(r"temp(\d+)", re.IGNORECASE)
 TEMP_UNIT = "C"
 
-# --- 3. Angle Windows & Crop Limits (2theta in degrees) ---
+# --- 3. Preprocessing Configuration ---
+ENABLE_PREPROCESSING = True
+REMOVE_SPIKES = True
+SPIKE_THRESHOLD_SIGMA = 5.0
+
+SUBTRACT_BASELINE = True
+BASELINE_METHOD = "snip"             # Options: "snip" or "asls"
+BASELINE_SNIP_ITERATIONS = 40        # Iteration clipping depth for SNIP
+
+ENABLE_SAVGOL = True
+SAVGOL_WINDOW = 9                   # Must be an odd integer
+SAVGOL_POLYORDER = 2                # Polynomial order
+
+SUBPIXEL_APEX = True                 # True: 3-point parabolic interpolation, False: raw discrete argmax
+
+# --- 4. Angle Windows & Crop Limits (2theta in degrees) ---
 TWO_THETA_CROP_MIN = 7.5
 TWO_THETA_MIN = 9.0
 TWO_THETA_MAX = 11.0
@@ -38,7 +53,7 @@ WATERFALL_OFFSET = 0.0
 SHOW_PEAK_TRACK = True
 CMAP_NAME = "viridis"
 
-# --- 4. Animation & Presentation Settings ---
+# --- 5. Animation & Presentation Settings ---
 MAKE_GIF = True
 SPLIT_TEMP = 500
 GIF_CUMULATIVE = True
@@ -51,14 +66,14 @@ GIF_LOOP = False
 MAKE_MP4 = False
 MAKE_PPTX = False
 
-# --- 5. ICDD / Reference Phases ---
+# --- 6. ICDD / Reference Phases ---
 SHOW_REFS = True
 LAMBDA_CU_KA1 = 1.540598
 LABEL_MIN_I = 8
 MIN_LABEL_SEP = 0.02
 REF_T_C = 25.0
 
-# --- 6. Peak Label Specifications ---
+# --- 7. Peak Label Specifications ---
 SHOW_PEAK_LABELS = True
 LABEL_FONTSIZE = 12
 LABELS_ON_ALL_SHOWN = False
