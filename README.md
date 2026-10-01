@@ -154,6 +154,8 @@ All generated outputs are saved to the **`output/`** directory:
 | `fda_fpca_modes.png` | 4-panel fPCA results: mean function $\mu(2\theta)$, continuous functional harmonics $\phi_j(2\theta)$, scree variance plot, and score trajectories $\xi_j(T)$ vs temperature. |
 | `fda_registration.png` | 3-panel curve registration: unregistered scans, pure thermal lattice strain field $w_i(2\theta)$, and registered pure-amplitude phase conversion curves $\tilde{x}_i(2\theta)$. |
 | `fda_scores_summary.txt` | Tabulated functional PCA scores $\xi_1(T), \xi_2(T)$ and thermal strain metrics vs temperature. |
+| `malthus_gp_kinetic_discovery.png` | 2-panel comparison of experimental FDA reaction coordinate $\alpha(T)$ vs. Malthus-GP symbolic solution and continuous reaction rate $\frac{d\alpha}{dT}$. |
+| `malthus_gp_discovered_formula.txt` | Discovered closed-form formula, $R^2$ score, peak reaction temperature, and residual table. |
 
 ---
 

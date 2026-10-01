@@ -11,7 +11,8 @@ Key FDA Capabilities:
 3. Continuous Functional Principal Component Analysis (fPCA) with quadrature L2 weighting.
 4. Curve Registration: Decoupling Phase Variation (thermal lattice expansion shift)
    from Amplitude Variation (chemical phase transition / peak growth & decay).
-5. Comprehensive multi-panel diagnostic visualizations.
+5. Autonomous Symbolic Kinetic Law Discovery using Malthus-GP (dCGP + JAX).
+6. Comprehensive multi-panel diagnostic visualizations.
 """
 
 import os
@@ -37,6 +38,13 @@ except ImportError:
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
     import config
     from scripts.preprocessing import preprocess_scan
+
+# Optional Malthus-GP Integration
+try:
+    from malthus_gp.learn import DCGPRegressor, CGPRegressor
+    HAS_MALTHUS_GP = True
+except ImportError:
+    HAS_MALTHUS_GP = False
 
 
 def load_dataset(data_dir=None, crop_min=7.5, crop_max=75.0, apply_preprocessing=True):
@@ -390,7 +398,116 @@ def export_fda_summary(temps, fpca_res, reg_res, output_path=None):
     return output_path
 
 
-def run_fda_pipeline():
+def discover_kinetics_with_malthus_gp(temps, fpca_res, output_dir=None, random_state=42):
+    r"""
+    Symbolic Kinetic Law Discovery using Malthus-GP (Differentiable Cartesian Genetic Programming).
+    Normalizes the primary functional reaction coordinate (fPC1 score) into the solid-state
+    conversion fraction \alpha(T) in [0, 1], and solves for the closed-form analytical rate law.
+    """
+    if not HAS_MALTHUS_GP:
+        print("[-] Malthus-GP is not available in the current environment. Skipping GP discovery.")
+        return None
+
+    if output_dir is None:
+        output_dir = config.OUTPUT_DIR
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print("\n" + "=" * 65)
+    print("  MALTHUS-GP: AUTONOMOUS KINETIC LAW DISCOVERY (dCGP + JAX)")
+    print("=" * 65)
+
+    scores1 = fpca_res["scores"][:, 0]
+    alpha = (scores1 - scores1[0]) / (scores1[-1] - scores1[0])
+
+    # Feature: Normalized temperature T / 1000
+    X = (temps / 1000.0).reshape(-1, 1)
+    y = alpha
+
+    print(f"[*] Training dCGP on {len(temps)} in-situ temperature points...")
+    dcgp = DCGPRegressor(
+        n_rows=1,
+        n_cols=25,
+        pop_size=5,
+        max_generations=150,
+        lsmf_epochs=12,
+        learning_rate=0.03,
+        random_state=random_state
+    )
+    dcgp.fit(X, y)
+
+    r2 = dcgp.score(X, y)
+    formula = dcgp.to_formula()
+
+    # Dense prediction and analytical temperature derivative
+    dense_T = np.linspace(temps.min(), temps.max(), 200)
+    dense_X = (dense_T / 1000.0).reshape(-1, 1)
+    dense_pred = dcgp.predict(dense_X)
+    d_pred_dT = np.gradient(dense_pred, dense_T)
+    t_peak_rate = dense_T[np.argmax(d_pred_dT)]
+
+    print(f"[+] Discovered Closed-Form Rate Model (R² = {r2:.4f}):")
+    print(f"    alpha(T) = {formula}")
+    print(f"[+] Peak Reaction Rate Temperature: T_max = {t_peak_rate:.1f} °C")
+
+    # Generate 2-panel Diagnostic Figure
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+
+    # Panel A: Conversion Extent alpha(T)
+    axes[0].scatter(temps, alpha, color="#d95f02", s=70, edgecolor="black", zorder=4, label=r"FDA Empirical Coordinate $\xi_1(T)$")
+    axes[0].plot(dense_T, dense_pred, color="#1b9e77", lw=2.5, label=f"Malthus-GP dCGP Model ($R^2={r2:.4f}$)")
+    axes[0].set_title(r"A. Solid-State Conversion Progress $\alpha(T)$" + f"\nFormula: {formula[:55]}...", fontsize=11, fontweight="bold", loc="left")
+    axes[0].set_xlabel("Temperature (°C)", fontsize=11, fontweight="bold")
+    axes[0].set_ylabel(r"Reaction Extent $\alpha(T)$", fontsize=11, fontweight="bold")
+    axes[0].grid(True, linestyle=":", alpha=0.6)
+    axes[0].legend(loc="upper left", frameon=True)
+
+    # Panel B: Reaction Rate Derivative d(alpha)/dT
+    axes[1].plot(dense_T, d_pred_dT * 1000.0, color="#7570b3", lw=2.5, label=r"dCGP Conversion Rate $\frac{d\alpha}{dT}$")
+    axes[1].axvline(t_peak_rate, color="red", linestyle="--", lw=1.5, label=f"Peak Rate: $T_{{max}} = {t_peak_rate:.1f}^\\circ\\text{{C}}$")
+    axes[1].scatter([t_peak_rate], [np.max(d_pred_dT) * 1000.0], color="red", s=80, zorder=5)
+    axes[1].set_title(r"B. Reaction Rate Derivative $\frac{d\alpha}{dT}$ (Transformation Kinetics)", fontsize=11, fontweight="bold", loc="left")
+    axes[1].set_xlabel("Temperature (°C)", fontsize=11, fontweight="bold")
+    axes[1].set_ylabel(r"Rate $\frac{d\alpha}{dT} \times 10^3$ ($^\circ\text{C}^{-1}$)", fontsize=11, fontweight="bold")
+    axes[1].grid(True, linestyle=":", alpha=0.6)
+    axes[1].legend(loc="upper left", frameon=True)
+
+    fig.tight_layout()
+    plot_path = output_dir / "malthus_gp_kinetic_discovery.png"
+    fig.savefig(plot_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    # Export Text Summary
+    summary_path = output_dir / "malthus_gp_discovered_formula.txt"
+    with open(summary_path, "w") as f:
+        f.write("========================================================================\n")
+        f.write("MALTHUS-GP: SYMBOLIC KINETIC RATE LAW DISCOVERY VIA dCGP & JAX AUTODIFF\n")
+        f.write("========================================================================\n")
+        f.write(f"R² Fit Score:                    {r2:.5f}\n")
+        f.write(f"Peak Conversion Temperature:     {t_peak_rate:.1f} °C\n")
+        f.write(f"Normalized Feature:              x0 = T_celsius / 1000.0\n")
+        f.write(f"Discovered Closed-Form Formula:\n  alpha(T) = {formula}\n\n")
+        f.write("Temperature (°C)   Empirical alpha   Predicted alpha   Residual\n")
+        f.write("------------------------------------------------------------------------\n")
+        pred_pts = dcgp.predict(X)
+        for t_val, a_emp, a_pred in zip(temps, alpha, pred_pts):
+            f.write(f"{t_val:12.1f}   {a_emp:15.4f}   {a_pred:15.4f}   {abs(a_emp - a_pred):10.4f}\n")
+        f.write("========================================================================\n")
+
+    print(f"[+] Saved Malthus-GP plot to:    {plot_path}")
+    print(f"[+] Saved Malthus-GP summary to: {summary_path}")
+
+    return {
+        "model": dcgp,
+        "r2": r2,
+        "formula": formula,
+        "t_peak_rate": t_peak_rate,
+        "plot_path": plot_path,
+        "summary_path": summary_path
+    }
+
+
+def run_fda_pipeline(run_gp=True):
     """
     Executes the full FDA pipeline end-to-end.
     """
@@ -398,27 +515,27 @@ def run_fda_pipeline():
     print("  FUNCTIONAL DATA ANALYSIS (FDA) PIPELINE FOR IN-SITU XRD")
     print("=" * 65)
 
-    print(f"[1/5] Loading data from {config.DATA_DIR}...")
+    print(f"[1/6] Loading data from {config.DATA_DIR}...")
     t_eval, temps, raw_y, filenames = load_dataset(crop_min=7.5, crop_max=75.0)
     print(f"      Loaded {len(temps)} diffractograms across {len(t_eval)} angular points.")
     print(f"      Temperature range: {temps.min():.0f} °C -> {temps.max():.0f} °C")
 
-    print(f"[2/5] Fitting Continuous B-Splines & Analytical Derivatives...")
+    print(f"[2/6] Fitting Continuous B-Splines & Analytical Derivatives...")
     splines, y_func, d1_func, d2_func = fit_functional_splines(t_eval, raw_y)
     print("      Continuous L^2 functional representations and derivatives computed.")
 
-    print(f"[3/5] Computing Continuous Functional PCA (fPCA)...")
+    print(f"[3/6] Computing Continuous Functional PCA (fPCA)...")
     fpca_res = compute_functional_pca(t_eval, y_func, n_components=4)
     print(f"      fPC1: {fpca_res['var_explained'][0]:.2f}% variance explained")
     print(f"      fPC2: {fpca_res['var_explained'][1]:.2f}% variance explained")
     print(f"      fPC3: {fpca_res['var_explained'][2]:.2f}% variance explained")
     print(f"      Total (1-2): {fpca_res['cumulative_var'][1]:.2f}% of structural evolution captured!")
 
-    print(f"[4/5] Computing Continuous Curve Registration (Phase-Amplitude Separation)...")
+    print(f"[4/6] Computing Continuous Curve Registration (Phase-Amplitude Separation)...")
     reg_res = compute_curve_registration(t_eval, y_func, ref_idx=0)
     print("      Lattice expansion strain field decoupled from chemical reaction conversion.")
 
-    print(f"[5/5] Exporting Diagnostic Visualizations and Summary Table...")
+    print(f"[5/6] Exporting Diagnostic Visualizations and Summary Table...")
     plot_fda_diagnostics(t_eval, temps, raw_y, y_func, d1_func, d2_func,
                          fpca_res, reg_res, config.OUTPUT_DIR)
     
@@ -427,10 +544,17 @@ def run_fda_pipeline():
     print(f"      Saved: {config.OUTPUT_DIR}/fda_splines_derivatives.png")
     print(f"      Saved: {config.OUTPUT_DIR}/fda_fpca_modes.png")
     print(f"      Saved: {config.OUTPUT_DIR}/fda_registration.png")
+
+    if run_gp and HAS_MALTHUS_GP:
+        print(f"[6/6] Executing Symbolic Kinetics Discovery via Malthus-GP...")
+        discover_kinetics_with_malthus_gp(temps, fpca_res, config.OUTPUT_DIR)
+    else:
+        print("[6/6] Malthus-GP kinetics step skipped.")
+
     print("=" * 65)
     print("FDA Pipeline completed successfully!")
     print("=" * 65)
 
 
 if __name__ == "__main__":
-    run_fda_pipeline()
+    run_fda_pipeline(run_gp=True)
