@@ -107,7 +107,7 @@ If you prefer an interactive notebook to inspect curves, plot reference ICDD lin
    jupyter lab
    # or: jupyter notebook
    ```
-2. Open [`findpeaks_V4.ipynb`](findpeaks_V4.ipynb).
+2. Open [`insitu_xrd_analysis.ipynb`](insitu_xrd_analysis.ipynb).
 3. Select your Python kernel.
 4. Run all cells (`Cell` $\rightarrow$ `Run All`, or `Shift + Enter` cell by cell).
 
