@@ -1,0 +1,25 @@
+# Data files (Never commit raw or synthetic laboratory data)
+data/*
+!data/.gitkeep
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+._*
+
+# Virtual environments
+.env
+.venv/
+env/
+venv/
+
+# Output directory (ignore all generated artifacts)
+output/*
+!output/.gitkeep
