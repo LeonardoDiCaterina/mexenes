@@ -1,6 +1,11 @@
 # Data files (Never commit raw or synthetic laboratory data)
 data/*
 !data/.gitkeep
+data_real/
+data_real/*
+*.xy
+*.dat
+*.chi
 
 # Python cache
 __pycache__/
