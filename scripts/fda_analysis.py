@@ -398,6 +398,47 @@ def export_fda_summary(temps, fpca_res, reg_res, output_path=None):
     return output_path
 
 
+
+def distill_clean_rate_law(temps, dense_T, dense_pred, alpha_emp=None):
+    """
+    Distills the dCGP empirical trajectory into a clean, zero-bloat canonical rate law:
+        alpha(T) = 0.5 * [1 + tanh((T - T_1/2) / Delta_T)]
+    Free of 'x0' variable indexing and fractional '0.xxx' decimals.
+    """
+    from scipy.optimize import curve_fit
+
+    def clean_tanh(T, T_half, Delta_T):
+        return 0.5 * (1.0 + np.tanh((T - T_half) / Delta_T))
+
+    popt, _ = curve_fit(clean_tanh, dense_T, dense_pred, p0=[540.0, 100.0])
+    t_half = float(np.round(popt[0]))
+    delta_t = float(np.round(popt[1]))
+
+    pred_clean = clean_tanh(dense_T, t_half, delta_t)
+    r2_clean = 1.0 - np.sum((dense_pred - pred_clean) ** 2) / np.sum((dense_pred - np.mean(dense_pred)) ** 2)
+
+    if alpha_emp is not None and temps is not None:
+        emp_clean = clean_tanh(temps, t_half, delta_t)
+        r2_emp = 1.0 - np.sum((alpha_emp - emp_clean) ** 2) / np.sum((alpha_emp - np.mean(alpha_emp)) ** 2)
+    else:
+        r2_emp = r2_clean
+
+    formula_clean = f"0.5 * (1 + tanh((T - {t_half:.0f}) / {delta_t:.0f}))"
+    latex_formula = rf"\alpha(T) = \frac{{1}}{{2}} \left[ 1 + \tanh\left( \frac{{T - {t_half:.0f}}}{{{delta_t:.0f}}} \right) \right]"
+    latex_deriv = rf"\frac{{d\alpha}}{{dT}} = \frac{{1}}{{{2*delta_t:.0f}}} \operatorname{{sech}}^2\left( \frac{{T - {t_half:.0f}}}{{{delta_t:.0f}}} \right)"
+
+    return {
+        "formula_clean": formula_clean,
+        "latex_formula": latex_formula,
+        "latex_deriv": latex_deriv,
+        "t_half": t_half,
+        "delta_t": delta_t,
+        "r2_clean": r2_clean,
+        "r2_emp": r2_emp,
+        "clean_pred": pred_clean
+    }
+
+
 def discover_kinetics_with_malthus_gp(temps, fpca_res, output_dir=None, random_state=42):
     r"""
     Symbolic Kinetic Law Discovery using Malthus-GP (Differentiable Cartesian Genetic Programming).
@@ -446,17 +487,22 @@ def discover_kinetics_with_malthus_gp(temps, fpca_res, output_dir=None, random_s
     d_pred_dT = np.gradient(dense_pred, dense_T)
     t_peak_rate = dense_T[np.argmax(d_pred_dT)]
 
+    # Distill zero-bloat canonical rate law
+    clean_info = distill_clean_rate_law(temps, dense_T, dense_pred, alpha)
+
     print(f"[+] Discovered Closed-Form Rate Model (R² = {r2:.4f}):")
-    print(f"    alpha(T) = {formula}")
-    print(f"[+] Peak Reaction Rate Temperature: T_max = {t_peak_rate:.1f} °C")
+    print(f"    Raw Genome:     alpha(T) = {formula}")
+    print(f"    Clean Rate Law: alpha(T) = {clean_info['formula_clean']} (R² = {clean_info['r2_emp']:.4f})")
+    print(f"[+] Peak Reaction Rate Temperature: T_max = {t_peak_rate:.1f} °C (T_1/2 = {clean_info['t_half']:.0f} °C)")
 
     # Generate 2-panel Diagnostic Figure
     fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
 
     # Panel A: Conversion Extent alpha(T)
     axes[0].scatter(temps, alpha, color="#d95f02", s=70, edgecolor="black", zorder=4, label=r"FDA Empirical Coordinate $\xi_1(T)$")
-    axes[0].plot(dense_T, dense_pred, color="#1b9e77", lw=2.5, label=f"Malthus-GP dCGP Model ($R^2={r2:.4f}$)")
-    axes[0].set_title(r"A. Solid-State Conversion Progress $\alpha(T)$" + f"\nFormula: {formula[:55]}...", fontsize=11, fontweight="bold", loc="left")
+    axes[0].plot(dense_T, dense_pred, color="#1b9e77", lw=2.5, label=f"Malthus-GP dCGP ($R^2={r2:.4f}$)")
+    axes[0].plot(dense_T, clean_info["clean_pred"], color="#2b83ba", lw=2.0, linestyle="--", label=f"Canonical Rate Law ($R^2={clean_info['r2_emp']:.4f}$)")
+    axes[0].set_title(r"A. Solid-State Conversion Progress $\alpha(T)$" + f"\nRate Law: $\\alpha(T) = \\frac{{1}}{{2}}[1 + \\tanh((T - {clean_info['t_half']:.0f}) / {clean_info['delta_t']:.0f})]$", fontsize=11, fontweight="bold", loc="left")
     axes[0].set_xlabel("Temperature (°C)", fontsize=11, fontweight="bold")
     axes[0].set_ylabel(r"Reaction Extent $\alpha(T)$", fontsize=11, fontweight="bold")
     axes[0].grid(True, linestyle=":", alpha=0.6)
@@ -480,19 +526,26 @@ def discover_kinetics_with_malthus_gp(temps, fpca_res, output_dir=None, random_s
     # Export Text Summary
     summary_path = output_dir / "malthus_gp_discovered_formula.txt"
     with open(summary_path, "w") as f:
-        f.write("========================================================================\n")
+        f.write("================================================================================\n")
         f.write("MALTHUS-GP: SYMBOLIC KINETIC RATE LAW DISCOVERY VIA dCGP & JAX AUTODIFF\n")
-        f.write("========================================================================\n")
-        f.write(f"R² Fit Score:                    {r2:.5f}\n")
+        f.write("================================================================================\n")
+        f.write(f"Empirical Rate Law R² Fit:       {clean_info['r2_emp']:.5f}\n")
+        f.write(f"Raw dCGP Model R² Fit:           {r2:.5f}\n")
         f.write(f"Peak Conversion Temperature:     {t_peak_rate:.1f} °C\n")
-        f.write(f"Normalized Feature:              x0 = T_celsius / 1000.0\n")
-        f.write(f"Discovered Closed-Form Formula:\n  alpha(T) = {formula}\n\n")
-        f.write("Temperature (°C)   Empirical alpha   Predicted alpha   Residual\n")
-        f.write("------------------------------------------------------------------------\n")
+        f.write(f"Transition Midpoint (T_1/2):     {clean_info['t_half']:.1f} °C\n")
+        f.write(f"Thermal Transition Width (ΔT):   {clean_info['delta_t']:.1f} °C\n\n")
+        f.write("CANONICAL DISTILLED RATE LAW (ZERO-BLOAT PUBLICATION FORM):\n")
+        f.write(f"  alpha(T) = {clean_info['formula_clean']}\n")
+        f.write(f"  LaTeX:     ${clean_info['latex_formula']}$\n\n")
+        f.write("RAW dCGP GENOME DAG (UNREDUCED FORM):\n")
+        f.write(f"  alpha(T) = {formula}\n\n")
+        f.write("Temperature (°C)   Empirical alpha   Distilled alpha   dCGP alpha   Residual\n")
+        f.write("--------------------------------------------------------------------------------\n")
         pred_pts = dcgp.predict(X)
-        for t_val, a_emp, a_pred in zip(temps, alpha, pred_pts):
-            f.write(f"{t_val:12.1f}   {a_emp:15.4f}   {a_pred:15.4f}   {abs(a_emp - a_pred):10.4f}\n")
-        f.write("========================================================================\n")
+        clean_pts = 0.5 * (1.0 + np.tanh((temps - clean_info['t_half']) / clean_info['delta_t']))
+        for t_val, a_emp, a_clean, a_pred in zip(temps, alpha, clean_pts, pred_pts):
+            f.write(f"{t_val:12.1f}   {a_emp:15.4f}   {a_clean:15.4f}   {a_pred:10.4f}   {abs(a_emp - a_clean):10.4f}\n")
+        f.write("================================================================================\n")
 
     print(f"[+] Saved Malthus-GP plot to:    {plot_path}")
     print(f"[+] Saved Malthus-GP summary to: {summary_path}")
@@ -500,7 +553,14 @@ def discover_kinetics_with_malthus_gp(temps, fpca_res, output_dir=None, random_s
     return {
         "model": dcgp,
         "r2": r2,
-        "formula": formula,
+        "formula": clean_info["formula_clean"],
+        "raw_formula": formula,
+        "clean_formula": clean_info["formula_clean"],
+        "latex_formula": clean_info["latex_formula"],
+        "latex_deriv": clean_info["latex_deriv"],
+        "t_half": clean_info["t_half"],
+        "delta_t": clean_info["delta_t"],
+        "r2_clean": clean_info["r2_emp"],
         "t_peak_rate": t_peak_rate,
         "plot_path": plot_path,
         "summary_path": summary_path
