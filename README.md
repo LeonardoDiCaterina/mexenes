@@ -13,6 +13,8 @@ Designed for tracking structural phase transitions, lattice thermal expansion, a
    - [Option A: Terminal / Command Line (Fastest)](#option-a-terminal--command-line-fastest)
    - [Option B: Interactive Jupyter Notebook](#option-b-interactive-jupyter-notebook)
    - [Option C: Evolutionary (GA) Peak Fitting Demo](#option-c-evolutionary-ga-peak-fitting-demo)
+   - [Option D: Functional Data Analysis (FDA) Pipeline](#option-d-functional-data-analysis-fda-pipeline)
+   - [Option E: Generating Synthetic Demo Data](#option-e-generating-synthetic-demo-data)
 4. [Output Files Explained](#4-output-files-explained)
 5. [Customizing Configuration (`config.py`)](#5-customizing-configuration-configpy)
 6. [Troubleshooting & FAQ](#6-troubleshooting--faq)
@@ -148,6 +150,10 @@ All generated outputs are saved to the **`output/`** directory:
 | `analysis_heatmap.png` | 2D color contour map showing $2\theta$ on the x-axis, temperature on the y-axis, and the red dashed peak tracking line. |
 | `analysis_evolution_*.gif` | *(If enabled in notebook)* Animated GIFs showing the real-time evolution of the diffractograms during heating. |
 | `ga_fit_demo.png` | Detailed Pseudo-Voigt peak fit with sub-step center estimation and residual difference plot. |
+| `fda_splines_derivatives.png` | 3-panel continuous B-spline curves, analytical 1st derivative ($x'$, peak apices), and 2nd derivative ($x''$, curvature). |
+| `fda_fpca_modes.png` | 4-panel fPCA results: mean function $\mu(2\theta)$, continuous functional harmonics $\phi_j(2\theta)$, scree variance plot, and score trajectories $\xi_j(T)$ vs temperature. |
+| `fda_registration.png` | 3-panel curve registration: unregistered scans, pure thermal lattice strain field $w_i(2\theta)$, and registered pure-amplitude phase conversion curves $\tilde{x}_i(2\theta)$. |
+| `fda_scores_summary.txt` | Tabulated functional PCA scores $\xi_1(T), \xi_2(T)$ and thermal strain metrics vs temperature. |
 
 ---
 
@@ -188,7 +194,7 @@ All parameters are centralized in [`config.py`](config.py). You never have to mo
 #### Q: How do I run the unit tests?
 * Run `python scripts/generate_synthetic_xrd.py` to generate the demo files, then run:
   ```bash
-  python tests/test_data_integrity.py
+  python -m unittest discover tests
   ```
 
 #### Q: Can I specify custom input/output folders outside this repository?
