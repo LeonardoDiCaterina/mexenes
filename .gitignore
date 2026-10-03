@@ -28,3 +28,7 @@ venv/
 # Output directory (ignore all generated artifacts)
 output/*
 !output/.gitkeep
+
+# Academic papers & PDFs
+papers/
+*.pdf
