@@ -399,18 +399,296 @@ def export_fda_summary(temps, fpca_res, reg_res, output_path=None):
 
 
 
+def fit_rutile_phase_evolution(t_eval, temps, raw_y, output_dir=None):
+    """
+    Performs explicit crystallographic peak deconvolution of the primary TiO2 Rutile (110)
+    reflection (2theta ~ 27.45 deg) across in-situ temperature scans.
+    
+    Uses a pseudo-Voigt profile with linear local background:
+        I(2theta) = b0 + b1*(2theta - 27.5) + A * [eta*L(2theta) + (1-eta)*G(2theta)]
+        
+    Extracts:
+        - Integrated Peak Area A_rutile(T)
+        - Peak centroid position 2theta(T) (tracking thermal lattice expansion)
+        - Peak FWHM w(T) (crystallite size broadening)
+        - Direct physical conversion fraction alpha_rutile(T) in [0, 1] (strictly non-negative)
+    """
+    from scipy.optimize import curve_fit
+
+    if output_dir is None:
+        output_dir = config.OUTPUT_DIR
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    def pseudo_voigt(x, b0, b1, A, mu, w, eta):
+        sigma = w / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+        G = np.exp(-0.5 * ((x - mu) / sigma) ** 2) / (sigma * np.sqrt(2.0 * np.pi))
+        gamma = w / 2.0
+        L = (1.0 / np.pi) * (gamma / ((x - mu) ** 2 + gamma ** 2))
+        return b0 + b1 * (x - 27.5) + A * (eta * L + (1.0 - eta) * G)
+
+    mask_fit = (t_eval >= 26.2) & (t_eval <= 28.8)
+    x_sub = t_eval[mask_fit]
+
+    rutile_areas = []
+    rutile_centers = []
+    rutile_fwhms = []
+    fits = []
+
+    for idx, temp in enumerate(temps):
+        y_sub = raw_y[idx, mask_fit]
+        b0_init = float(np.min(y_sub))
+        b1_init = float((y_sub[-1] - y_sub[0]) / (x_sub[-1] - x_sub[0]))
+        A_init = float(max(np.max(y_sub) - b0_init, 0.0) * 0.4)
+        bounds = ([-100, -100, 0.0, 27.0, 0.1, 0.0], [2000, 100, 5000, 27.8, 1.5, 1.0])
+        try:
+            popt, _ = curve_fit(
+                pseudo_voigt, x_sub, y_sub,
+                p0=[b0_init, b1_init, A_init, 27.42, 0.35, 0.5],
+                bounds=bounds,
+                maxfev=5000
+            )
+            b0, b1, A, mu, w, eta = popt
+            if A < 5.0 or np.max(y_sub) - np.min(y_sub) < 15.0:
+                A = 0.0
+                mu = np.nan
+                w = np.nan
+                fit_curve = b0_init + b1_init * (x_sub - 27.5)
+            else:
+                fit_curve = pseudo_voigt(x_sub, *popt)
+        except Exception:
+            A = 0.0
+            mu = np.nan
+            w = np.nan
+            fit_curve = b0_init + b1_init * (x_sub - 27.5)
+
+        rutile_areas.append(A)
+        rutile_centers.append(mu)
+        rutile_fwhms.append(w)
+        fits.append(fit_curve)
+
+    rutile_areas = np.array(rutile_areas)
+    rutile_centers = np.array(rutile_centers)
+    rutile_fwhms = np.array(rutile_fwhms)
+
+    denom = np.max(rutile_areas) - np.min(rutile_areas)
+    if denom > 0:
+        alpha_rutile = (rutile_areas - np.min(rutile_areas)) / denom
+    else:
+        alpha_rutile = np.zeros_like(rutile_areas)
+    alpha_rutile = np.clip(alpha_rutile, 0.0, 1.0)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+
+    colors = plt.cm.inferno(np.linspace(0.15, 0.85, len(temps)))
+    for idx, temp in enumerate(temps):
+        y_sub = raw_y[idx, mask_fit]
+        offset = idx * 120
+        axes[0].plot(x_sub, y_sub + offset, color=colors[idx], lw=1.2, alpha=0.7)
+        axes[0].plot(x_sub, fits[idx] + offset, color="black", lw=1.5, linestyle="--")
+        axes[0].text(28.85, y_sub[-1] + offset, f"{temp:.0f} °C", color=colors[idx], fontsize=8, va="center")
+
+    axes[0].axvline(27.446, color="#0072B2", linestyle=":", lw=1.5, label="Rutile (110) ICDD (27.446°)")
+    axes[0].set_title("A. In-Situ Rutile (110) Peak Deconvolution (Pseudo-Voigt)", fontsize=11, fontweight="bold", loc="left")
+    axes[0].set_xlabel("2θ (degrees)", fontsize=11, fontweight="bold")
+    axes[0].set_ylabel("Intensity + Offset (a.u.)", fontsize=11, fontweight="bold")
+    axes[0].legend(loc="upper left", frameon=True)
+    axes[0].grid(True, linestyle=":", alpha=0.5)
+
+    ax2 = axes[1]
+    ax2_twin = ax2.twinx()
+
+    p1 = ax2.plot(temps, alpha_rutile, "o-", color="#d95f02", lw=2.2, ms=7, label=r"Measured Rutile Fraction $lpha_{\mathrm{rutile}}(T)$")
+    valid_mu = [(t, m) for t, m in zip(temps, rutile_centers) if np.isfinite(m)]
+    if valid_mu:
+        t_v, m_v = zip(*valid_mu)
+        p2 = ax2_twin.plot(t_v, m_v, "s--", color="#2b83ba", lw=1.8, ms=6, label=r"Peak Centroid $2	heta$ (Lattice Expansion)")
+    else:
+        p2 = []
+
+    ax2.set_title("B. Quantitative Phase Evolution & Lattice Shift", fontsize=11, fontweight="bold", loc="left")
+    ax2.set_xlabel("Temperature (°C)", fontsize=11, fontweight="bold")
+    ax2.set_ylabel(r"Measured Conversion $lpha_{\mathrm{rutile}} \in [0, 1]$", color="#d95f02", fontsize=11, fontweight="bold")
+    ax2_twin.set_ylabel(r"Peak Position $2	heta$ (°)", color="#2b83ba", fontsize=11, fontweight="bold")
+    ax2.set_ylim(-0.02, 1.05)
+    ax2.grid(True, linestyle=":", alpha=0.5)
+
+    lines = p1 + p2
+    labels = [l.get_label() for l in lines]
+    ax2.legend(lines, labels, loc="center left", frameon=True)
+
+    fig.tight_layout()
+    plot_path = output_dir / "rutile_peak_deconvolution.png"
+    fig.savefig(plot_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    return {
+        "rutile_areas": rutile_areas,
+        "rutile_centers": rutile_centers,
+        "rutile_fwhms": rutile_fwhms,
+        "alpha_rutile": alpha_rutile,
+        "plot_path": plot_path
+    }
+
+
+
+def fit_rutile_phase_evolution(t_eval, temps, raw_y, output_dir=None):
+    """
+    Performs explicit crystallographic peak deconvolution of the primary TiO2 Rutile (110)
+    reflection (2theta ~ 27.45 deg) across in-situ temperature scans.
+    
+    Uses a pseudo-Voigt profile with linear local background:
+        I(2theta) = b0 + b1*(2theta - 27.5) + A * [eta*L(2theta) + (1-eta)*G(2theta)]
+        
+    Extracts:
+        - Integrated Peak Area A_rutile(T)
+        - Peak centroid position 2theta(T) (tracking thermal lattice expansion)
+        - Peak FWHM w(T) (crystallite size broadening)
+        - Direct physical conversion fraction alpha_rutile(T) in [0, 1] (strictly non-negative)
+    """
+    from scipy.optimize import curve_fit
+
+    if output_dir is None:
+        output_dir = config.OUTPUT_DIR
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    def pseudo_voigt(x, b0, b1, A, mu, w, eta):
+        sigma = w / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+        G = np.exp(-0.5 * ((x - mu) / sigma) ** 2) / (sigma * np.sqrt(2.0 * np.pi))
+        gamma = w / 2.0
+        L = (1.0 / np.pi) * (gamma / ((x - mu) ** 2 + gamma ** 2))
+        return b0 + b1 * (x - 27.5) + A * (eta * L + (1.0 - eta) * G)
+
+    mask_fit = (t_eval >= 26.2) & (t_eval <= 28.8)
+    x_sub = t_eval[mask_fit]
+
+    rutile_areas = []
+    rutile_centers = []
+    rutile_fwhms = []
+    fits = []
+
+    for idx, temp in enumerate(temps):
+        y_sub = raw_y[idx, mask_fit]
+        b0_init = float(np.min(y_sub))
+        b1_init = float((y_sub[-1] - y_sub[0]) / (x_sub[-1] - x_sub[0]))
+        A_init = float(max(np.max(y_sub) - b0_init, 0.0) * 0.4)
+        bounds = ([-100, -100, 0.0, 27.0, 0.1, 0.0], [2000, 100, 5000, 27.8, 1.5, 1.0])
+        try:
+            popt, _ = curve_fit(
+                pseudo_voigt, x_sub, y_sub,
+                p0=[b0_init, b1_init, A_init, 27.42, 0.35, 0.5],
+                bounds=bounds,
+                maxfev=5000
+            )
+            b0, b1, A, mu, w, eta = popt
+            if A < 5.0 or np.max(y_sub) - np.min(y_sub) < 15.0:
+                A = 0.0
+                mu = np.nan
+                w = np.nan
+                fit_curve = b0_init + b1_init * (x_sub - 27.5)
+            else:
+                fit_curve = pseudo_voigt(x_sub, *popt)
+        except Exception:
+            A = 0.0
+            mu = np.nan
+            w = np.nan
+            fit_curve = b0_init + b1_init * (x_sub - 27.5)
+
+        rutile_areas.append(A)
+        rutile_centers.append(mu)
+        rutile_fwhms.append(w)
+        fits.append(fit_curve)
+
+    rutile_areas = np.array(rutile_areas)
+    rutile_centers = np.array(rutile_centers)
+    rutile_fwhms = np.array(rutile_fwhms)
+
+    denom = np.max(rutile_areas) - np.min(rutile_areas)
+    if denom > 0:
+        alpha_rutile = (rutile_areas - np.min(rutile_areas)) / denom
+    else:
+        alpha_rutile = np.zeros_like(rutile_areas)
+    alpha_rutile = np.clip(alpha_rutile, 0.0, 1.0)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+
+    colors = plt.cm.inferno(np.linspace(0.15, 0.85, len(temps)))
+    for idx, temp in enumerate(temps):
+        y_sub = raw_y[idx, mask_fit]
+        offset = idx * 120
+        axes[0].plot(x_sub, y_sub + offset, color=colors[idx], lw=1.2, alpha=0.7)
+        axes[0].plot(x_sub, fits[idx] + offset, color="black", lw=1.5, linestyle="--")
+        axes[0].text(28.85, y_sub[-1] + offset, f"{temp:.0f} °C", color=colors[idx], fontsize=8, va="center")
+
+    axes[0].axvline(27.446, color="#0072B2", linestyle=":", lw=1.5, label="Rutile (110) ICDD (27.446°)")
+    axes[0].set_title("A. In-Situ Rutile (110) Peak Deconvolution (Pseudo-Voigt)", fontsize=11, fontweight="bold", loc="left")
+    axes[0].set_xlabel("2θ (degrees)", fontsize=11, fontweight="bold")
+    axes[0].set_ylabel("Intensity + Offset (a.u.)", fontsize=11, fontweight="bold")
+    axes[0].legend(loc="upper left", frameon=True)
+    axes[0].grid(True, linestyle=":", alpha=0.5)
+
+    ax2 = axes[1]
+    ax2_twin = ax2.twinx()
+
+    p1 = ax2.plot(temps, alpha_rutile, "o-", color="#d95f02", lw=2.2, ms=7, label=r"Measured Rutile Fraction $\alpha_{\mathrm{rutile}}(T)$")
+    valid_mu = [(t, m) for t, m in zip(temps, rutile_centers) if np.isfinite(m)]
+    if valid_mu:
+        t_v, m_v = zip(*valid_mu)
+        p2 = ax2_twin.plot(t_v, m_v, "s--", color="#2b83ba", lw=1.8, ms=6, label=r"Peak Centroid $2\theta$ (Lattice Expansion)")
+    else:
+        p2 = []
+
+    ax2.set_title("B. Quantitative Phase Evolution & Lattice Shift", fontsize=11, fontweight="bold", loc="left")
+    ax2.set_xlabel("Temperature (°C)", fontsize=11, fontweight="bold")
+    ax2.set_ylabel(r"Measured Conversion $\alpha_{\mathrm{rutile}} \in [0, 1]$", color="#d95f02", fontsize=11, fontweight="bold")
+    ax2_twin.set_ylabel(r"Peak Position $2\theta$ (°)", color="#2b83ba", fontsize=11, fontweight="bold")
+    ax2.set_ylim(-0.02, 1.05)
+    ax2.grid(True, linestyle=":", alpha=0.5)
+
+    lines = p1 + p2
+    labels = [l.get_label() for l in lines]
+    ax2.legend(lines, labels, loc="center left", frameon=True)
+
+    fig.tight_layout()
+    plot_path = output_dir / "rutile_peak_deconvolution.png"
+    fig.savefig(plot_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    return {
+        "rutile_areas": rutile_areas,
+        "rutile_centers": rutile_centers,
+        "rutile_fwhms": rutile_fwhms,
+        "alpha_rutile": alpha_rutile,
+        "plot_path": plot_path
+    }
+
+
 def distill_clean_rate_law(temps, dense_T, dense_pred, alpha_emp=None):
     """
-    Distills the dCGP empirical trajectory into a clean, zero-bloat canonical rate law:
+    Fits the standard empirical 2-parameter logistic/tanh phase transition model:
         alpha(T) = 0.5 * [1 + tanh((T - T_1/2) / Delta_T)]
-    Free of 'x0' variable indexing and fractional '0.xxx' decimals.
+    parameterizing the non-isothermal transformation midpoint (T_1/2) and width (Delta_T).
+
+    NOTE (ICTAC Kinetics Standard): In non-isothermal thermal analysis at a single heating rate,
+    alpha(T) parameterizes the empirical phase transition curve. Decoupling the full kinetic triplet
+    (Ea, A, f(alpha)) requires multi-heating-rate isoconversional analysis.
     """
     from scipy.optimize import curve_fit
 
     def clean_tanh(T, T_half, Delta_T):
         return 0.5 * (1.0 + np.tanh((T - T_half) / Delta_T))
 
-    popt, _ = curve_fit(clean_tanh, dense_T, dense_pred, p0=[540.0, 100.0])
+    # Dynamically estimate initial parameter guesses from data without hardcoding
+    if alpha_emp is not None and temps is not None and len(temps) > 1:
+        idx_half = int(np.argmin(np.abs(alpha_emp - 0.5)))
+        p0_thalf = float(temps[idx_half])
+        p0_delta = max(float(temps[-1] - temps[0]) / 8.0, 20.0)
+    else:
+        p0_thalf = float(np.median(dense_T))
+        p0_delta = max(float(dense_T[-1] - dense_T[0]) / 8.0, 20.0)
+
+    popt, _ = curve_fit(clean_tanh, dense_T, dense_pred, p0=[p0_thalf, p0_delta])
     t_half = float(np.round(popt[0]))
     delta_t = float(np.round(popt[1]))
 
@@ -419,7 +697,8 @@ def distill_clean_rate_law(temps, dense_T, dense_pred, alpha_emp=None):
 
     if alpha_emp is not None and temps is not None:
         emp_clean = clean_tanh(temps, t_half, delta_t)
-        r2_emp = 1.0 - np.sum((alpha_emp - emp_clean) ** 2) / np.sum((alpha_emp - np.mean(alpha_emp)) ** 2)
+        denom = np.sum((alpha_emp - np.mean(alpha_emp)) ** 2)
+        r2_emp = 1.0 - np.sum((alpha_emp - emp_clean) ** 2) / denom if denom > 0 else r2_clean
     else:
         r2_emp = r2_clean
 
@@ -438,12 +717,14 @@ def distill_clean_rate_law(temps, dense_T, dense_pred, alpha_emp=None):
         "clean_pred": pred_clean
     }
 
-
-def discover_kinetics_with_malthus_gp(temps, fpca_res, output_dir=None, random_state=42):
+def discover_kinetics_with_malthus_gp(temps, fpca_res=None, alpha_custom=None, output_dir=None, random_state=42):
     r"""
-    Symbolic Kinetic Law Discovery using Malthus-GP (Differentiable Cartesian Genetic Programming).
-    Normalizes the primary functional reaction coordinate (fPC1 score) into the solid-state
-    conversion fraction \alpha(T) in [0, 1], and solves for the closed-form analytical rate law.
+    Phase Transition Modeling using Malthus-GP (dCGP + JAX).
+    Takes either:
+      1. alpha_custom: direct crystallographic phase conversion (e.g. from Rutile (110) deconvolution)
+      2. fpca_res: continuous 1st functional principal component score, baseline-corrected to [0, 1].
+
+    Solves for the continuous transformation progress alpha(T) and analytical derivative d(alpha)/dT.
     """
     if not HAS_MALTHUS_GP:
         print("[-] Malthus-GP is not available in the current environment. Skipping GP discovery.")
@@ -455,17 +736,27 @@ def discover_kinetics_with_malthus_gp(temps, fpca_res, output_dir=None, random_s
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("\n" + "=" * 65)
-    print("  MALTHUS-GP: AUTONOMOUS KINETIC LAW DISCOVERY (dCGP + JAX)")
+    print("  MALTHUS-GP: PHASE TRANSITION MODELING (dCGP + JAX)")
     print("=" * 65)
 
-    scores1 = fpca_res["scores"][:, 0]
-    alpha = (scores1 - scores1[0]) / (scores1[-1] - scores1[0])
+    if alpha_custom is not None:
+        alpha = np.asarray(alpha_custom, dtype=float)
+        alpha_source = "Rutile (110) Bragg Peak Deconvolution"
+    elif fpca_res is not None:
+        scores1 = fpca_res["scores"][:, 0]
+        pre_reaction_base = np.min(scores1[:3])
+        denom = scores1[-1] - pre_reaction_base
+        alpha = (scores1 - pre_reaction_base) / denom if denom > 0 else np.zeros_like(scores1)
+        alpha = np.clip(alpha, 0.0, 1.0)
+        alpha_source = "Baseline-Corrected fPC1 Coordinate"
+    else:
+        raise ValueError("Must provide either alpha_custom or fpca_res.")
 
     # Feature: Normalized temperature T / 1000
     X = (temps / 1000.0).reshape(-1, 1)
     y = alpha
 
-    print(f"[*] Training dCGP on {len(temps)} in-situ temperature points...")
+    print(f"[*] Modeling phase transition on {len(temps)} in-situ scans (Source: {alpha_source})...")
     dcgp = DCGPRegressor(
         n_rows=1,
         n_cols=25,
@@ -487,32 +778,33 @@ def discover_kinetics_with_malthus_gp(temps, fpca_res, output_dir=None, random_s
     d_pred_dT = np.gradient(dense_pred, dense_T)
     t_peak_rate = dense_T[np.argmax(d_pred_dT)]
 
-    # Distill zero-bloat canonical rate law
+    # Parameterize canonical transition model
     clean_info = distill_clean_rate_law(temps, dense_T, dense_pred, alpha)
 
-    print(f"[+] Discovered Closed-Form Rate Model (R² = {r2:.4f}):")
-    print(f"    Raw Genome:     alpha(T) = {formula}")
-    print(f"    Clean Rate Law: alpha(T) = {clean_info['formula_clean']} (R² = {clean_info['r2_emp']:.4f})")
-    print(f"[+] Peak Reaction Rate Temperature: T_max = {t_peak_rate:.1f} °C (T_1/2 = {clean_info['t_half']:.0f} °C)")
+    print(f"[+] Evolved Transition Model (R² = {r2:.4f}):")
+    print(f"    Raw dCGP Genome: alpha(T) = {formula}")
+    print(f"    Canonical Model: alpha(T) = {clean_info['formula_clean']} (R² = {clean_info['r2_emp']:.4f})")
+    print(f"[+] Transition Midpoint: T_1/2 = {clean_info['t_half']:.0f} °C (Width ΔT = {clean_info['delta_t']:.0f} °C)")
 
     # Generate 2-panel Diagnostic Figure
     fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
 
     # Panel A: Conversion Extent alpha(T)
-    axes[0].scatter(temps, alpha, color="#d95f02", s=70, edgecolor="black", zorder=4, label=r"FDA Empirical Coordinate $\xi_1(T)$")
+    axes[0].scatter(temps, alpha, color="#d95f02", s=70, edgecolor="black", zorder=4, label=f"Measured {alpha_source}")
     axes[0].plot(dense_T, dense_pred, color="#1b9e77", lw=2.5, label=f"Malthus-GP dCGP ($R^2={r2:.4f}$)")
-    axes[0].plot(dense_T, clean_info["clean_pred"], color="#2b83ba", lw=2.0, linestyle="--", label=f"Canonical Rate Law ($R^2={clean_info['r2_emp']:.4f}$)")
-    axes[0].set_title(r"A. Solid-State Conversion Progress $\alpha(T)$" + f"\nRate Law: $\\alpha(T) = \\frac{{1}}{{2}}[1 + \\tanh((T - {clean_info['t_half']:.0f}) / {clean_info['delta_t']:.0f})]$", fontsize=11, fontweight="bold", loc="left")
+    axes[0].plot(dense_T, clean_info["clean_pred"], color="#2b83ba", lw=2.0, linestyle="--", label=f"Canonical Model ($R^2={clean_info['r2_emp']:.4f}$)")
+    axes[0].set_title(r"A. Solid-State Conversion Progress $\alpha(T)$" + f"\nModel: $\\alpha(T) = \\frac{{1}}{{2}}[1 + \\tanh((T - {clean_info['t_half']:.0f}) / {clean_info['delta_t']:.0f})]$", fontsize=11, fontweight="bold", loc="left")
     axes[0].set_xlabel("Temperature (°C)", fontsize=11, fontweight="bold")
-    axes[0].set_ylabel(r"Reaction Extent $\alpha(T)$", fontsize=11, fontweight="bold")
+    axes[0].set_ylabel(r"Phase Conversion $\alpha(T) \in [0, 1]$", fontsize=11, fontweight="bold")
+    axes[0].set_ylim(-0.02, 1.05)
     axes[0].grid(True, linestyle=":", alpha=0.6)
     axes[0].legend(loc="upper left", frameon=True)
 
     # Panel B: Reaction Rate Derivative d(alpha)/dT
-    axes[1].plot(dense_T, d_pred_dT * 1000.0, color="#7570b3", lw=2.5, label=r"dCGP Conversion Rate $\frac{d\alpha}{dT}$")
-    axes[1].axvline(t_peak_rate, color="red", linestyle="--", lw=1.5, label=f"Peak Rate: $T_{{max}} = {t_peak_rate:.1f}^\\circ\\text{{C}}$")
+    axes[1].plot(dense_T, d_pred_dT * 1000.0, color="#7570b3", lw=2.5, label=r"Conversion Velocity $\frac{d\alpha}{dT}$")
+    axes[1].axvline(t_peak_rate, color="red", linestyle="--", lw=1.5, label=f"Peak Velocity: $T_{{max}} = {t_peak_rate:.1f}^\\circ\\text{{C}}$")
     axes[1].scatter([t_peak_rate], [np.max(d_pred_dT) * 1000.0], color="red", s=80, zorder=5)
-    axes[1].set_title(r"B. Reaction Rate Derivative $\frac{d\alpha}{dT}$ (Transformation Kinetics)", fontsize=11, fontweight="bold", loc="left")
+    axes[1].set_title(r"B. Analytical Transformation Velocity $\frac{d\alpha}{dT}$", fontsize=11, fontweight="bold", loc="left")
     axes[1].set_xlabel("Temperature (°C)", fontsize=11, fontweight="bold")
     axes[1].set_ylabel(r"Rate $\frac{d\alpha}{dT} \times 10^3$ ($^\circ\text{C}^{-1}$)", fontsize=11, fontweight="bold")
     axes[1].grid(True, linestyle=":", alpha=0.6)
@@ -527,28 +819,34 @@ def discover_kinetics_with_malthus_gp(temps, fpca_res, output_dir=None, random_s
     summary_path = output_dir / "malthus_gp_discovered_formula.txt"
     with open(summary_path, "w") as f:
         f.write("================================================================================\n")
-        f.write("MALTHUS-GP: SYMBOLIC KINETIC RATE LAW DISCOVERY VIA dCGP & JAX AUTODIFF\n")
+        f.write("MALTHUS-GP: SOLID-STATE PHASE TRANSITION MODELING (dCGP + JAX)\n")
         f.write("================================================================================\n")
-        f.write(f"Empirical Rate Law R² Fit:       {clean_info['r2_emp']:.5f}\n")
-        f.write(f"Raw dCGP Model R² Fit:           {r2:.5f}\n")
-        f.write(f"Peak Conversion Temperature:     {t_peak_rate:.1f} °C\n")
+        f.write(f"Input Phase Coordinate:          {alpha_source}\n")
+        f.write(f"Canonical Model R² Fit:          {clean_info['r2_emp']:.5f}\n")
+        f.write(f"Raw dCGP Genome R² Fit:          {r2:.5f}\n")
+        f.write(f"Peak Rate Temperature (T_max):   {t_peak_rate:.1f} °C\n")
         f.write(f"Transition Midpoint (T_1/2):     {clean_info['t_half']:.1f} °C\n")
         f.write(f"Thermal Transition Width (ΔT):   {clean_info['delta_t']:.1f} °C\n\n")
-        f.write("CANONICAL DISTILLED RATE LAW (ZERO-BLOAT PUBLICATION FORM):\n")
+        f.write("CANONICAL TRANSITION MODEL (PUBLICATION FORM):\n")
         f.write(f"  alpha(T) = {clean_info['formula_clean']}\n")
         f.write(f"  LaTeX:     ${clean_info['latex_formula']}$\n\n")
         f.write("RAW dCGP GENOME DAG (UNREDUCED FORM):\n")
         f.write(f"  alpha(T) = {formula}\n\n")
-        f.write("Temperature (°C)   Empirical alpha   Distilled alpha   dCGP alpha   Residual\n")
+        f.write("Temperature (°C)   Measured alpha   Fitted alpha   dCGP alpha   Residual\n")
         f.write("--------------------------------------------------------------------------------\n")
         pred_pts = dcgp.predict(X)
         clean_pts = 0.5 * (1.0 + np.tanh((temps - clean_info['t_half']) / clean_info['delta_t']))
         for t_val, a_emp, a_clean, a_pred in zip(temps, alpha, clean_pts, pred_pts):
-            f.write(f"{t_val:12.1f}   {a_emp:15.4f}   {a_clean:15.4f}   {a_pred:10.4f}   {abs(a_emp - a_clean):10.4f}\n")
+            f.write(f"{t_val:12.1f}   {a_emp:14.4f}   {a_clean:14.4f}   {a_pred:10.4f}   {abs(a_emp - a_clean):10.4f}\n")
+        f.write("================================================================================\n")
+        f.write("NOTE ON CHEMICAL KINETICS (ICTAC COMMITTEE STANDARDS):\n")
+        f.write("This model parameterizes the non-isothermal cumulative conversion alpha(T) at\n")
+        f.write("a single heating rate. True decoupling of the kinetic triplet (Ea, A, f(alpha))\n")
+        f.write("requires multi-heating-rate isoconversional series (e.g. 5, 10, 15, 20 °C/min).\n")
         f.write("================================================================================\n")
 
-    print(f"[+] Saved Malthus-GP plot to:    {plot_path}")
-    print(f"[+] Saved Malthus-GP summary to: {summary_path}")
+    print(f"[+] Saved model plot to:    {plot_path}")
+    print(f"[+] Saved model summary to: {summary_path}")
 
     return {
         "model": dcgp,
@@ -565,7 +863,6 @@ def discover_kinetics_with_malthus_gp(temps, fpca_res, output_dir=None, random_s
         "plot_path": plot_path,
         "summary_path": summary_path
     }
-
 
 def run_fda_pipeline(run_gp=True):
     """
@@ -598,23 +895,26 @@ def run_fda_pipeline(run_gp=True):
     print(f"[5/6] Exporting Diagnostic Visualizations and Summary Table...")
     plot_fda_diagnostics(t_eval, temps, raw_y, y_func, d1_func, d2_func,
                          fpca_res, reg_res, config.OUTPUT_DIR)
-    
+
     out_table = export_fda_summary(temps, fpca_res, reg_res)
     print(f"      Saved: {out_table}")
     print(f"      Saved: {config.OUTPUT_DIR}/fda_splines_derivatives.png")
     print(f"      Saved: {config.OUTPUT_DIR}/fda_fpca_modes.png")
     print(f"      Saved: {config.OUTPUT_DIR}/fda_registration.png")
 
+    print(f"[5b/6] Deconvolving Rutile (110) Phase Evolution across Temperature...")
+    rutile_res = fit_rutile_phase_evolution(t_eval, temps, raw_y, config.OUTPUT_DIR)
+    print(f"      Saved: {rutile_res['plot_path']}")
+
     if run_gp and HAS_MALTHUS_GP:
-        print(f"[6/6] Executing Symbolic Kinetics Discovery via Malthus-GP...")
-        discover_kinetics_with_malthus_gp(temps, fpca_res, config.OUTPUT_DIR)
+        print(f"[6/6] Executing Phase Transition Modeling via Malthus-GP...")
+        discover_kinetics_with_malthus_gp(temps, fpca_res, alpha_custom=rutile_res["alpha_rutile"], output_dir=config.OUTPUT_DIR)
     else:
-        print("[6/6] Malthus-GP kinetics step skipped.")
+        print("[6/6] Malthus-GP step skipped.")
 
     print("=" * 65)
     print("FDA Pipeline completed successfully!")
     print("=" * 65)
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     run_fda_pipeline(run_gp=True)
